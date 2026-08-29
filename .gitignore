@@ -1,0 +1,9 @@
+# Data and Database backups
+*.bak 
+*.mdf
+*.ldf
+/data/
+
+# OS/IDE junk
+.DS_Store
+.vscode/
