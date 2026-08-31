@@ -22,3 +22,17 @@ BEGIN
     PRINT 'Schema [staging] created successfully.';
 END
 GO
+
+-- 4. Create Analytics Schema for processed data
+IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = N'analytics')
+BEGIN
+    EXEC('CREATE SCHEMA analytics');
+    PRINT 'Schema [analytics] created successfully.';
+END
+
+-- 5. Create Audit Schema for data quality checks
+IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = N'audit')
+BEGIN
+    EXEC('CREATE SCHEMA audit');
+    PRINT 'Schema [audit] created successfully.';
+END
