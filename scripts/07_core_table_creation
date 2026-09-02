@@ -1,0 +1,143 @@
+USE CapitalMarketsDB;
+GO
+
+DROP TABLE IF EXISTS core.Transactions;
+DROP TABLE IF EXISTS core.Loans;
+DROP TABLE IF EXISTS core.Accounts;
+DROP TABLE IF EXISTS core.Customers;
+DROP TABLE IF EXISTS core.Addresses;
+GO
+
+-- 1. Addresses
+CREATE TABLE core.Addresses (
+    AddressID INT PRIMARY KEY,
+    Street NVARCHAR(150) NOT NULL,
+    City NVARCHAR(100) NOT NULL,
+    Country NVARCHAR(100) NOT NULL
+);
+WITH RankedAddresses AS (
+    SELECT
+        AddressID, Street, City, Country,
+        ROW_NUMBER() OVER (PARTITION BY AddressID 
+            ORDER BY 
+                CASE WHEN Street IS NOT NULL THEN 1 ELSE 2 END,
+                AddressID
+        ) AS RowNum
+    FROM staging.RawAddresses
+    WHERE AddressID IS NOT NULL AND TRIM(AddressID) <> ''
+)
+INSERT INTO core.Addresses (
+    AddressID, Street, City, Country
+)
+SELECT CAST(AddressID AS INT) AS AddressID,
+       COALESCE(NULLIF(TRIM(Street), ''), 'UNKNOWN') AS Street,
+       COALESCE(NULLIF(TRIM(City), ''), 'UNKNOWN') AS City,
+       -- Standardize Country typos
+        CASE 
+            WHEN TRIM(Country) IN ('United States', 'US', 'U.S.', 'U.S.A.', 'USA', 'United State', 'United States of America') 
+                THEN 'United States'
+            -- Catch any remaining string containing 'United' or 'US'
+            WHEN TRIM(Country) LIKE '%United%' OR TRIM(Country) LIKE '%US%' OR TRIM(Country) LIKE '%States%'
+                THEN 'United States'
+            -- Fallback if an unexpected valid country name appears
+            ELSE COALESCE(NULLIF(TRIM(Country), ''), 'UNKNOWN') 
+        END AS Country
+FROM RankedAddresses
+WHERE RowNum = 1; -- Selects the first occurrence of each AddressID
+
+SELECT Country, COUNT(*) AS AddressCount FROM core.Addresses GROUP BY Country;
+-- 2. Customers
+CREATE TABLE core.Customers (
+    CustomerID INT PRIMARY KEY,
+    FirstName NVARCHAR(100) NOT NULL,
+    LastName NVARCHAR(100) NOT NULL,
+    DateOfBirth DATE NOT NULL,
+    AddressID INT NOT NULL,
+    CustomerTypeID INT NOT NULL,
+    FOREIGN KEY (AddressID) REFERENCES core.Addresses(AddressID)
+);
+WITH CleanedDates AS (
+    SELECT 
+        CAST(CustomerID AS INT) AS CustomerID,
+        ISNULL(NULLIF(TRIM(FirstName), ''), 'Unknown') AS FirstName,
+        ISNULL(NULLIF(TRIM(LastName), ''), 'Unknown') AS LastName,
+        TRY_CAST(
+            CASE 
+                WHEN DateOfBirth LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
+                 AND CAST(SUBSTRING(DateOfBirth, 6, 2) AS INT) > 12
+                    THEN CONCAT(
+                        SUBSTRING(DateOfBirth, 1, 4), '-', 
+                        SUBSTRING(DateOfBirth, 9, 2), '-', 
+                        SUBSTRING(DateOfBirth, 6, 2)
+                    )
+                ELSE NULLIF(TRIM(DateOfBirth), 'NaT')
+            END AS DATE
+        ) AS ParsedDOB,
+        CAST(AddressID AS INT) AS AddressID,
+        CAST(CustomerTypeID AS INT) AS CustomerTypeID
+    FROM staging.RawCustomers
+)
+INSERT INTO core.Customers (
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID
+)
+SELECT CustomerID, FirstName, LastName, ParsedDOB, AddressID, CustomerTypeID
+FROM CleanedDates
+WHERE CustomerID NOT IN (
+    SELECT CAST(CustomerID AS INT) 
+    FROM audit.QuarantineCustomers 
+    WHERE CustomerID IS NOT NULL AND TRIM(CustomerID) <> ''
+);
+
+-- 3. Accounts
+CREATE TABLE core.Accounts (
+    AccountID INT PRIMARY KEY,
+    CustomerID INT NOT NULL,
+    AccountTypeID INT NOT NULL,
+    AccountStatusID INT NOT NULL,
+    Balance DECIMAL(18,2) NOT NULL,
+    OpeningDate DATE NOT NULL,
+    FOREIGN KEY (CustomerID) REFERENCES core.Customers(CustomerID)
+);
+
+-- 4. Loans
+CREATE TABLE core.Loans (
+    LoanID INT PRIMARY KEY,
+    AccountID INT NOT NULL,
+    LoanStatusID INT NOT NULL,
+    PrincipalAmount DECIMAL(18,2) NOT NULL,
+    InterestRate DECIMAL(5,4) NOT NULL,
+    StartDate DATE NOT NULL,
+    EstimatedEndDate DATE NOT NULL,
+    FOREIGN KEY (AccountID) REFERENCES core.Accounts(AccountID)
+);
+
+-- 5. Transactions
+CREATE TABLE core.Transactions (
+    TransactionID INT PRIMARY KEY,
+    AccountOriginID INT NOT NULL,
+    AccountDestinationID INT NOT NULL,
+    TransactionTypeID INT NOT NULL,
+    Amount DECIMAL(18,2) NOT NULL,
+    TransactionDate DATETIME2 NOT NULL,
+    BranchID INT NULL,
+    Description NVARCHAR(255) NULL,
+    FOREIGN KEY (AccountOriginID) REFERENCES core.Accounts(AccountID),
+    FOREIGN KEY (AccountDestinationID) REFERENCES core.Accounts(AccountID)
+);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

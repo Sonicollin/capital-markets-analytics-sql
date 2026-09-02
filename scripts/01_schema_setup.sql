@@ -36,3 +36,11 @@ BEGIN
     EXEC('CREATE SCHEMA audit');
     PRINT 'Schema [audit] created successfully.';
 END
+
+-- 6. Create Core Schema for core data structures
+IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = N'core')
+BEGIN
+    EXEC('CREATE SCHEMA core');
+    PRINT 'Schema [core] created successfully.';
+END
+GO
