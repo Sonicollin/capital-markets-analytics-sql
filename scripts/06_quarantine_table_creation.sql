@@ -77,6 +77,7 @@ SELECT DISTINCT
                                         'Logical Business Violation: Future OpeningDate detected'
                                       ))
             THEN 'Referential Integrity Violation: AccountDestinationID has critical data quality issues'
+            ELSE 'Referential Integrity Violation: AccountDestinationID is quarantined in QuarantineAccounts'
     END AS QuarantineReason
 FROM staging.RawTransactions
 WHERE TransactionDate IS NOT NULL AND TransactionDate <> ''
@@ -88,19 +89,6 @@ WHERE TransactionDate IS NOT NULL AND TransactionDate <> ''
     OR AccountDestinationID IN (SELECT AccountID FROM audit.QuarantineAccounts 
                                WHERE QuarantineReason NOT IN ('Duplicate Account ID', 'Referential Integrity Violation: CustomerID is quarantined in QuarantineCustomers'))
   );
-
--- SELECT QuarantineReason, COUNT(*) FROM audit.QuarantineTransactions
--- GROUP BY QuarantineReason
--- ORDER BY COUNT(*) DESC;
-
--- SELECT QuarantineReason, COUNT(*) FROM audit.QuarantineAccounts
--- GROUP BY QuarantineReason
--- ORDER BY COUNT(*) DESC;
-
--- SELECT QuarantineReason, COUNT(*) FROM audit.QuarantineCustomers
--- GROUP BY QuarantineReason
--- ORDER BY COUNT(*) DESC;
--- WHERE QuarantineReason LIKE '%QuarantineAddresses%';
 
 -- ==========================================
 -- 2. QUARANTINE LOANS
@@ -215,106 +203,6 @@ WHERE AccountID NOT IN (SELECT AccountID FROM staging.RawAccounts)
 GO
 
 -- ==========================================
--- 3. QUARANTINE CUSTOMERS
--- ==========================================
-DROP TABLE IF EXISTS audit.QuarantineCustomers;
-
-CREATE TABLE audit.QuarantineCustomers (
-        QuarantineID INT IDENTITY(1,1) PRIMARY KEY,
-        CustomerID NVARCHAR(200),
-        FirstName NVARCHAR(200),
-        LastName NVARCHAR(200),
-        DateOfBirth NVARCHAR(200),
-        AddressID NVARCHAR(200),
-        CustomerTypeID NVARCHAR(200),
-        QuarantineReason NVARCHAR(255),
-        QuarantineDate DATETIME DEFAULT GETDATE()
-);
-GO
-
--- Quarantine Customer Records with Duplicate Customer IDs --
-INSERT INTO audit.QuarantineCustomers (
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
-)
-SELECT DISTINCT
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
-    'Duplicate Customer ID' AS QuarantineReason
-FROM staging.RawCustomers
-WHERE CustomerID IN (
-    SELECT CustomerID
-    FROM staging.RawCustomers
-    GROUP BY CustomerID
-    HAVING COUNT(*) > 1
-);
-GO
-
--- Quarantine Customer Records with Missing Primary Key, Missing Names or Invalid DOB
-WITH CleanedCustomerDates AS (
-    SELECT 
-        CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
-        TRY_CAST(
-            CASE 
-                WHEN DateOfBirth LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
-                 AND CAST(SUBSTRING(DateOfBirth, 6, 2) AS INT) > 12
-                    THEN CONCAT(
-                        SUBSTRING(DateOfBirth, 1, 4), '-', 
-                        SUBSTRING(DateOfBirth, 9, 2), '-', 
-                        SUBSTRING(DateOfBirth, 6, 2)
-                    )
-                ELSE NULLIF(TRIM(DateOfBirth), 'NaT')
-            END AS DATE
-        ) AS ParsedDOB
-    FROM staging.RawCustomers
-)
-INSERT INTO audit.QuarantineCustomers (
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
-)
-SELECT 
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
-    CASE 
-        WHEN CustomerID IS NULL OR TRIM(CustomerID) = '' 
-            THEN 'Missing Primary Key: CustomerID is NULL or Blank'
-        WHEN (FirstName IS NULL OR TRIM(FirstName) = '') AND (LastName IS NULL OR TRIM(LastName) = '') 
-            THEN 'Both First and Last Name are blank'
-        WHEN DateOfBirth IS NULL OR TRIM(DateOfBirth) = '' OR TRIM(DateOfBirth) = 'NaT' 
-            THEN 'DateOfBirth is missing/NaT'
-        WHEN ParsedDOB IS NULL 
-            THEN 'Data Format Violation: Unparseable DateOfBirth string'
-        WHEN ParsedDOB > GETDATE() 
-            THEN 'Logical Business Violation: Future DateOfBirth detected'
-    END AS QuarantineReason
-FROM CleanedCustomerDates
-WHERE CustomerID IS NULL OR TRIM(CustomerID) = ''
-   OR ((FirstName IS NULL OR TRIM(FirstName) = '') AND (LastName IS NULL OR TRIM(LastName) = ''))
-   OR DateOfBirth IS NULL OR TRIM(DateOfBirth) = '' OR TRIM(DateOfBirth) = 'NaT'
-   OR ParsedDOB IS NULL
-   OR ParsedDOB > GETDATE();
-GO
-
--- Quarantine Customer Records with Invalid Address IDs --
-INSERT INTO audit.QuarantineCustomers (
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
-)
-SELECT DISTINCT
-    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
-    CASE
-        WHEN AddressID NOT IN (SELECT AddressID FROM staging.RawAddresses)
-            THEN 'Referential Integrity Violation: AddressID does not exist in RawAddresses'
-        -- ONLY quarantine if address has CRITICAL issues (not duplicates)
-        WHEN AddressID IN (SELECT AddressID FROM audit.QuarantineAddresses 
-                           WHERE QuarantineReason IN (
-                              'Missing Primary Key: AddressID is NULL or Blank',
-                              'Missing Country: Country is NULL or Blank'
-                           ))
-            THEN 'Referential Integrity Violation: AddressID has critical data quality issues'
-    END AS QuarantineReason
-FROM staging.RawCustomers
-WHERE AddressID NOT IN (SELECT AddressID FROM staging.RawAddresses)
-   OR AddressID IN (SELECT AddressID FROM audit.QuarantineAddresses 
-                    WHERE QuarantineReason NOT IN ('Duplicate Address ID'));
-GO
-
--- ==========================================
 -- 4. QUARANTINE ACCOUNTS
 -- ==========================================
 DROP TABLE IF EXISTS audit.QuarantineAccounts;
@@ -389,9 +277,6 @@ WHERE AccountID IS NULL OR TRIM(AccountID) = ''
    OR ParsedOpeningDate > GETDATE();
 GO
 
-SELECT * FROM audit.QuarantineAccounts
-WHERE QuarantineReason IS NULL
-
 -- Quarantine Account Records with Invalid Customer IDs --
 INSERT INTO audit.QuarantineAccounts (
     AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate, QuarantineReason
@@ -408,7 +293,7 @@ SELECT DISTINCT
                                'Both First and Last Name are blank',
                                'DateOfBirth is missing/NaT',
                                'Data Format Violation: Unparseable DateOfBirth string',
-                               'Logical Business Violation: Future DateOfBirth detected'
+                               'Future Date of Birth'
                             ))
             THEN 'Referential Integrity Violation: CustomerID has critical data quality issues'
         ELSE 'Referential Integrity Violation: CustomerID is quarantined in QuarantineCustomers'
@@ -417,6 +302,106 @@ FROM staging.RawAccounts
 WHERE CustomerID NOT IN (SELECT CustomerID FROM staging.RawCustomers)
    OR CustomerID IN (SELECT CustomerID FROM audit.QuarantineCustomers 
                      WHERE QuarantineReason NOT IN ('Duplicate Customer ID', 'Referential Integrity Violation: AddressID is quarantined in QuarantineAddresses'));
+GO
+-- ==========================================
+-- 4. QUARANTINE CUSTOMERS
+-- ==========================================
+DROP TABLE IF EXISTS audit.QuarantineCustomers;
+
+CREATE TABLE audit.QuarantineCustomers (
+        QuarantineID INT IDENTITY(1,1) PRIMARY KEY,
+        CustomerID NVARCHAR(200),
+        FirstName NVARCHAR(200),
+        LastName NVARCHAR(200),
+        DateOfBirth NVARCHAR(200),
+        AddressID NVARCHAR(200),
+        CustomerTypeID NVARCHAR(200),
+        QuarantineReason NVARCHAR(255),
+        QuarantineDate DATETIME DEFAULT GETDATE()
+);
+GO
+
+-- Quarantine Customer Records with Duplicate Customer IDs --
+INSERT INTO audit.QuarantineCustomers (
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
+)
+SELECT DISTINCT
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+    'Duplicate Customer ID' AS QuarantineReason
+FROM staging.RawCustomers
+WHERE CustomerID IN (
+    SELECT CustomerID
+    FROM staging.RawCustomers
+    GROUP BY CustomerID
+    HAVING COUNT(*) > 1
+);
+GO
+
+-- Quarantine Customer Records with Missing Primary Key, Missing Names or Invalid DOB
+WITH CleanedCustomerDates AS (
+    SELECT 
+        CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+        TRY_CAST(
+            CASE
+            -- Swap month and day if the month is greater than 12 (assuming the format is YYYY-DD-MM) -- 
+                WHEN DateOfBirth LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
+                 AND CAST(SUBSTRING(DateOfBirth, 6, 2) AS INT) > 12
+                    THEN CONCAT(
+                        SUBSTRING(DateOfBirth, 1, 4), '-', 
+                        SUBSTRING(DateOfBirth, 9, 2), '-', 
+                        SUBSTRING(DateOfBirth, 6, 2)
+                    )
+                ELSE NULLIF(TRIM(DateOfBirth), 'NaT')
+            END AS DATE
+        ) AS ParsedDOB
+    FROM staging.RawCustomers
+)
+INSERT INTO audit.QuarantineCustomers (
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
+)
+SELECT 
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+    CASE 
+        WHEN CustomerID IS NULL OR TRIM(CustomerID) = '' 
+            THEN 'Missing Primary Key: CustomerID is NULL or Blank'
+        WHEN (FirstName IS NULL OR TRIM(FirstName) = '') AND (LastName IS NULL OR TRIM(LastName) = '') 
+            THEN 'Both First and Last Name are blank'
+        WHEN DateOfBirth IS NULL OR TRIM(DateOfBirth) = '' OR TRIM(DateOfBirth) = 'NaT' 
+            THEN 'DateOfBirth is missing/NaT'
+        WHEN ParsedDOB IS NULL 
+            THEN 'Data Format Violation: Unparseable DateOfBirth string'
+        WHEN ParsedDOB > GETDATE() 
+            THEN 'Future Date of Birth'
+    END AS QuarantineReason
+FROM CleanedCustomerDates
+WHERE CustomerID IS NULL OR TRIM(CustomerID) = ''
+   OR ((FirstName IS NULL OR TRIM(FirstName) = '') AND (LastName IS NULL OR TRIM(LastName) = ''))
+   OR DateOfBirth IS NULL OR TRIM(DateOfBirth) = '' OR TRIM(DateOfBirth) = 'NaT'
+   OR ParsedDOB IS NULL
+   OR ParsedDOB > GETDATE();
+GO
+
+-- Quarantine Customer Records with Invalid Address IDs --
+INSERT INTO audit.QuarantineCustomers (
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
+)
+SELECT DISTINCT
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+    CASE
+        WHEN AddressID NOT IN (SELECT AddressID FROM staging.RawAddresses)
+            THEN 'Referential Integrity Violation: AddressID does not exist in RawAddresses'
+        -- ONLY quarantine if address has CRITICAL issues (not duplicates)
+        WHEN AddressID IN (SELECT AddressID FROM audit.QuarantineAddresses 
+                           WHERE QuarantineReason IN (
+                              'Missing Primary Key: AddressID is NULL or Blank',
+                              'Missing Country'
+                           ))
+            THEN 'Referential Integrity Violation: AddressID quarantined in QuarantineAddresses'
+    END AS QuarantineReason
+FROM staging.RawCustomers
+WHERE AddressID NOT IN (SELECT AddressID FROM staging.RawAddresses)
+   OR AddressID IN (SELECT AddressID FROM audit.QuarantineAddresses 
+                    WHERE QuarantineReason NOT IN ('Duplicate Address ID'));
 GO
 
 -- ==========================================
@@ -465,17 +450,11 @@ SELECT
         WHEN AddressID IS NULL OR TRIM(AddressID) = '' 
             THEN 'Missing Primary Key: AddressID is NULL or Blank'
         WHEN Country IS NULL OR TRIM(Country) = '' 
-            THEN 'Missing Country: Country is NULL or Blank'
+            THEN 'Missing Country'
     END AS QuarantineReason
 FROM staging.RawAddresses
 WHERE AddressID IS NULL OR TRIM(AddressID) = ''
    OR Country IS NULL OR TRIM(Country) = ''
 GO
 
-SELECT * FROM audit.QuarantineTransactions;
-SELECT * FROM audit.QuarantineLoans;
-SELECT * FROM audit.QuarantineAccounts
-WHERE QuarantineReason IS NULL
-SELECT * FROM audit.QuarantineCustomers;
-SELECT * FROM audit.QuarantineAddresses;
-
+SELECT * FROM audit.QuarantineCustomers
