@@ -203,7 +203,7 @@ WHERE AccountID NOT IN (SELECT AccountID FROM staging.RawAccounts)
 GO
 
 -- ==========================================
--- 4. QUARANTINE ACCOUNTS
+-- 3. QUARANTINE ACCOUNTS
 -- ==========================================
 DROP TABLE IF EXISTS audit.QuarantineAccounts;
 
@@ -295,14 +295,14 @@ SELECT DISTINCT
                                'Data Format Violation: Unparseable DateOfBirth string',
                                'Future Date of Birth'
                             ))
-            THEN 'Referential Integrity Violation: CustomerID has critical data quality issues'
-        ELSE 'Referential Integrity Violation: CustomerID is quarantined in QuarantineCustomers'
+            THEN 'Referential Integrity Violation: CustomerID quarantined in QuarantineCustomers'
     END AS QuarantineReason
 FROM staging.RawAccounts
 WHERE CustomerID NOT IN (SELECT CustomerID FROM staging.RawCustomers)
    OR CustomerID IN (SELECT CustomerID FROM audit.QuarantineCustomers 
                      WHERE QuarantineReason NOT IN ('Duplicate Customer ID', 'Referential Integrity Violation: AddressID is quarantined in QuarantineAddresses'));
 GO
+
 -- ==========================================
 -- 4. QUARANTINE CUSTOMERS
 -- ==========================================
@@ -421,17 +421,27 @@ CREATE TABLE audit.QuarantineAddresses (
 GO
 
 -- Quarantine Duplicate Address Records --
+WITH RankedAddresses AS (
+    SELECT
+        AddressID, Street, City, Country,
+        ROW_NUMBER() OVER (
+            PARTITION BY AddressID 
+            ORDER BY
+                CASE WHEN Street IS NOT NULL AND TRIM(Street) <> '' THEN 1 ELSE 2 END,
+                AddressID
+        ) AS RowNum
+    FROM staging.RawAddresses
+    WHERE AddressID IS NOT NULL AND TRIM(AddressID) <> ''
+)
 INSERT INTO audit.QuarantineAddresses (
     AddressID, Street, City, Country, QuarantineReason
 )
 SELECT DISTINCT
     AddressID, Street, City, Country,
     'Duplicate Address ID' AS QuarantineReason
-FROM staging.RawAddresses
-WHERE AddressID IN (SELECT AddressID
-              FROM staging.RawAddresses
-              GROUP BY AddressID
-              HAVING COUNT(*) > 1);
+FROM RankedAddresses
+WHERE RowNum > 1; -- Captures 2nd, 3rd, etc. occurrences of duplicate AddressIDs
+GO
 
 -- Quarantine Address Records with Missing Primary Key or Country --
 INSERT INTO audit.QuarantineAddresses (
@@ -443,18 +453,10 @@ INSERT INTO audit.QuarantineAddresses (
 )
 SELECT 
     AddressID,
-    Street,
-    City,
-    Country,
-    CASE 
-        WHEN AddressID IS NULL OR TRIM(AddressID) = '' 
-            THEN 'Missing Primary Key: AddressID is NULL or Blank'
-        WHEN Country IS NULL OR TRIM(Country) = '' 
-            THEN 'Missing Country'
-    END AS QuarantineReason
+    COALESCE(NULLIF(TRIM(Street), ''), 'UNKNOWN') AS Street,
+    COALESCE(NULLIF(TRIM(City), ''), 'UNKNOWN') AS City,
+    COALESCE(NULLIF(TRIM(Country), ''), 'UNKNOWN') AS Country,
+    'Missing Primary Key: AddressID is NULL or Blank' AS QuarantineReason
 FROM staging.RawAddresses
 WHERE AddressID IS NULL OR TRIM(AddressID) = ''
-   OR Country IS NULL OR TRIM(Country) = ''
 GO
-
-SELECT * FROM audit.QuarantineCustomers
