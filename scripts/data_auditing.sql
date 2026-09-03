@@ -264,3 +264,15 @@ SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAddre
 SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineCustomers GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
 SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAccounts GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
 
+
+SELECT
+    session_id,
+    status,
+    command,
+    wait_type,
+    wait_time,
+    blocking_session_id,
+    cpu_time,
+    logical_reads
+FROM sys.dm_exec_requests
+WHERE session_id <> @@SPID;

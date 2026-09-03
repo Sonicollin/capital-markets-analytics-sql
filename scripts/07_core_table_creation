@@ -15,37 +15,52 @@ CREATE TABLE core.Addresses (
     City NVARCHAR(100) NOT NULL,
     Country NVARCHAR(100) NOT NULL
 );
+
+-- Log redundant Address records into QuarantineAddresses table
 WITH RankedAddresses AS (
     SELECT
         AddressID, Street, City, Country,
         ROW_NUMBER() OVER (PARTITION BY AddressID 
             ORDER BY 
-                CASE WHEN Street IS NOT NULL THEN 1 ELSE 2 END,
-                AddressID
+                CASE WHEN Street IS NOT NULL AND TRIM(Street) <> '' THEN 1 ELSE 2 END
         ) AS RowNum
     FROM staging.RawAddresses
     WHERE AddressID IS NOT NULL AND TRIM(AddressID) <> ''
 )
-INSERT INTO core.Addresses (
-    AddressID, Street, City, Country
+INSERT INTO audit.QuarantineAddresses (
+    AddressID, Street, City, Country, QuarantineReason
 )
-SELECT CAST(AddressID AS INT) AS AddressID,
-       COALESCE(NULLIF(TRIM(Street), ''), 'UNKNOWN') AS Street,
-       COALESCE(NULLIF(TRIM(City), ''), 'UNKNOWN') AS City,
-       -- Standardize Country typos
-        CASE 
-            WHEN TRIM(Country) IN ('United States', 'US', 'U.S.', 'U.S.A.', 'USA', 'United State', 'United States of America') 
-                THEN 'United States'
-            -- Catch any remaining string containing 'United' or 'US'
-            WHEN TRIM(Country) LIKE '%United%' OR TRIM(Country) LIKE '%US%' OR TRIM(Country) LIKE '%States%'
-                THEN 'United States'
-            -- Fallback if an unexpected valid country name appears
-            ELSE COALESCE(NULLIF(TRIM(Country), ''), 'UNKNOWN') 
-        END AS Country
+SELECT AddressID, Street, City, Country, 'Duplicate Address ID' AS QuarantineReason
 FROM RankedAddresses
-WHERE RowNum = 1; -- Selects the first occurrence of each AddressID
+WHERE RowNum > 1; -- Selects the duplicate occurrences of each AddressID
 
-SELECT Country, COUNT(*) AS AddressCount FROM core.Addresses GROUP BY Country;
+-- Load the unique Address records into the core.Addresses table
+WITH RankedAddresses AS (
+    SELECT
+        AddressID, Street, City, Country,
+        ROW_NUMBER() OVER (PARTITION BY AddressID 
+            ORDER BY 
+                CASE WHEN Street IS NOT NULL AND TRIM(Street) <> '' THEN 1 ELSE 2 END
+        ) AS RowNum
+    FROM staging.RawAddresses
+    WHERE AddressID IS NOT NULL AND TRIM(AddressID) <> ''
+)
+INSERT INTO core.Addresses (AddressID, Street, City, Country)
+SELECT 
+    CAST(AddressID AS INT) AS AddressID,
+    COALESCE(NULLIF(TRIM(Street), ''), 'Unknown') AS Street,
+    COALESCE(NULLIF(TRIM(City), ''), 'Unknown') AS City,
+    -- Standardize Country names --
+    CASE 
+        WHEN TRIM(Country) IN ('United States', 'US', 'U.S.', 'U.S.A.', 'USA', 'United State', 'United States of America') 
+            THEN 'United States'
+        WHEN TRIM(Country) LIKE '%United%' OR TRIM(Country) LIKE '%US%' OR TRIM(Country) LIKE '%States%'
+            THEN 'United States'
+        ELSE COALESCE(NULLIF(TRIM(Country), ''), 'United States') 
+    END AS Country
+FROM RankedAddresses
+WHERE RowNum = 1; -- Selects the first occurrence of each AddressID 
+
 -- 2. Customers
 CREATE TABLE core.Customers (
     CustomerID INT PRIMARY KEY,
@@ -56,36 +71,69 @@ CREATE TABLE core.Customers (
     CustomerTypeID INT NOT NULL,
     FOREIGN KEY (AddressID) REFERENCES core.Addresses(AddressID)
 );
-WITH CleanedDates AS (
-    SELECT 
-        CAST(CustomerID AS INT) AS CustomerID,
-        ISNULL(NULLIF(TRIM(FirstName), ''), 'Unknown') AS FirstName,
-        ISNULL(NULLIF(TRIM(LastName), ''), 'Unknown') AS LastName,
-        TRY_CAST(
-            CASE 
-                WHEN DateOfBirth LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
-                 AND CAST(SUBSTRING(DateOfBirth, 6, 2) AS INT) > 12
-                    THEN CONCAT(
-                        SUBSTRING(DateOfBirth, 1, 4), '-', 
-                        SUBSTRING(DateOfBirth, 9, 2), '-', 
-                        SUBSTRING(DateOfBirth, 6, 2)
-                    )
-                ELSE NULLIF(TRIM(DateOfBirth), 'NaT')
-            END AS DATE
-        ) AS ParsedDOB,
-        CAST(AddressID AS INT) AS AddressID,
-        CAST(CustomerTypeID AS INT) AS CustomerTypeID
+-- Handle Duplicates --
+
+-- Log the redundant Customer records into QuarantineCustomers table
+WITH RankedCustomers AS (
+    SELECT
+        CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+        ROW_NUMBER() OVER (PARTITION BY CustomerID 
+            ORDER BY 
+                CASE WHEN DateOfBirth IS NOT NULL AND TRIM(DateOfBirth) <> 'NaT' THEN 1 
+                     WHEN LastName IS NOT NULL AND TRIM(LastName) <> '' THEN 2
+                     ELSE 3 END
+        ) AS RowNum
     FROM staging.RawCustomers
+    WHERE CustomerID IS NOT NULL AND TRIM(CustomerID) <> ''
+)
+INSERT INTO audit.QuarantineCustomers (
+    CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, QuarantineReason
+)
+SELECT CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID, 'Duplicate Customer ID'
+FROM RankedCustomers
+WHERE RowNum > 1;
+
+-- Load the unique Customer records into Core Customers table
+WITH RankedCustomers AS (
+    SELECT
+        CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID,
+        ROW_NUMBER() OVER (PARTITION BY CustomerID 
+            ORDER BY 
+                CASE WHEN DateOfBirth IS NOT NULL AND TRIM(DateOfBirth) <> 'NaT' THEN 1 
+                     WHEN LastName IS NOT NULL AND TRIM(LastName) <> '' THEN 2
+                     ELSE 3 END
+        ) AS RowNum
+    FROM staging.RawCustomers
+    WHERE CustomerID IS NOT NULL AND TRIM(CustomerID) <> ''
 )
 INSERT INTO core.Customers (
     CustomerID, FirstName, LastName, DateOfBirth, AddressID, CustomerTypeID
 )
-SELECT CustomerID, FirstName, LastName, ParsedDOB, AddressID, CustomerTypeID
-FROM CleanedDates
-WHERE CustomerID NOT IN (
+SELECT 
+    CAST(CustomerID AS INT) AS CustomerID,
+    COALESCE(NULLIF(TRIM(FirstName), ''), 'Unknown') AS FirstName,
+    COALESCE(NULLIF(TRIM(LastName), ''), 'Unknown') AS LastName,
+    TRY_CAST(
+        CASE
+            -- Handle cases where the month and day are swapped in the date string 
+            WHEN DateOfBirth LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
+             AND CAST(SUBSTRING(DateOfBirth, 6, 2) AS INT) > 12
+                THEN CONCAT(
+                    SUBSTRING(DateOfBirth, 1, 4), '-', 
+                    SUBSTRING(DateOfBirth, 9, 2), '-', 
+                    SUBSTRING(DateOfBirth, 6, 2)
+                )
+            ELSE COALESCE(NULLIF(TRIM(DateOfBirth), 'NaT'), '1900-01-01') -- Default to a known date if invalid
+        END AS DATE
+    ) AS DateOfBirth,
+    CAST(AddressID AS INT) AS AddressID,
+    CAST(CustomerTypeID AS INT) AS CustomerTypeID
+FROM RankedCustomers
+WHERE RowNum = 1 -- Selects the first occurrence of each CustomerID
+AND CustomerID NOT IN (
     SELECT CAST(CustomerID AS INT) 
     FROM audit.QuarantineCustomers 
-    WHERE CustomerID IS NOT NULL AND TRIM(CustomerID) <> ''
+    WHERE CustomerID IS NOT NULL AND TRIM(CustomerID) <> '' AND QuarantineReason <> 'Duplicate Customer ID'
 );
 
 -- 3. Accounts
@@ -99,17 +147,144 @@ CREATE TABLE core.Accounts (
     FOREIGN KEY (CustomerID) REFERENCES core.Customers(CustomerID)
 );
 
+-- Handle duplicates --
+
+-- Log the redundant Account records into QuarantineAccounts table
+WITH RankedAccounts AS (
+    SELECT
+        AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate,
+        ROW_NUMBER() OVER (PARTITION BY AccountID
+            ORDER BY 
+                CASE WHEN CustomerID IS NOT NULL AND TRIM(CustomerID) <> '' THEN 1 
+                     WHEN BALANCE IS NOT NULL THEN 2
+                     ELSE 3 END
+        ) AS RowNum
+    FROM staging.RawAccounts
+    WHERE AccountID IS NOT NULL AND TRIM(AccountID) <> ''
+)
+INSERT INTO audit.QuarantineAccounts (
+    AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate, QuarantineReason
+)
+SELECT AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate, 'Duplicate Account ID'
+FROM RankedAccounts
+WHERE RowNum > 1;
+
+-- Load the unique Account records into Core Accounts table
+WITH RankedAccounts AS (
+    SELECT
+        AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate,
+        ROW_NUMBER() OVER (PARTITION BY AccountID
+            ORDER BY 
+                CASE WHEN CustomerID IS NOT NULL AND TRIM(CustomerID) <> '' THEN 1 
+                     WHEN BALANCE IS NOT NULL THEN 2
+                     ELSE 3 END
+        ) AS RowNum
+    FROM staging.RawAccounts
+    WHERE AccountID IS NOT NULL AND TRIM(AccountID) <> ''
+)
+INSERT INTO core.Accounts (
+    AccountID, CustomerID, AccountTypeID, AccountStatusID, Balance, OpeningDate
+)
+SELECT 
+    CAST(AccountID AS INT) AS AccountID,
+    CAST(CustomerID AS INT) AS CustomerID,
+    CAST(AccountTypeID AS INT) AS AccountTypeID,
+    CAST(AccountStatusID AS INT) AS AccountStatusID,
+    CAST(Balance AS DECIMAL(18,2)) AS Balance,
+    TRY_CAST(
+        CASE
+            -- Handle cases where the month and day are swapped in the date string 
+            WHEN OpeningDate LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
+             AND CAST(SUBSTRING(OpeningDate, 6, 2) AS INT) > 12
+                THEN CONCAT(
+                    SUBSTRING(OpeningDate, 1, 4), '-', 
+                    SUBSTRING(OpeningDate, 9, 2), '-', 
+                    SUBSTRING(OpeningDate, 6, 2)
+                )
+            ELSE COALESCE(NULLIF(TRIM(OpeningDate), 'NaT'), '1900-01-01') -- Default to a known date if invalid
+        END AS DATE
+    ) AS OpeningDate
+FROM RankedAccounts
+WHERE RowNum = 1
+    AND AccountID NOT IN (
+        SELECT AccountID FROM audit.QuarantineAccounts
+        WHERE AccountID IS NOT NULL AND TRIM(AccountID) <> '' AND QuarantineReason <> 'Duplicate Account ID'
+    );
+GO
+
 -- 4. Loans
 CREATE TABLE core.Loans (
     LoanID INT PRIMARY KEY,
     AccountID INT NOT NULL,
     LoanStatusID INT NOT NULL,
     PrincipalAmount DECIMAL(18,2) NOT NULL,
-    InterestRate DECIMAL(5,4) NOT NULL,
+    InterestRate DECIMAL(7,4) NOT NULL,
     StartDate DATE NOT NULL,
     EstimatedEndDate DATE NOT NULL,
     FOREIGN KEY (AccountID) REFERENCES core.Accounts(AccountID)
 );
+
+-- Handle duplicates --
+
+-- Log the redundant Account records into QuarantineAccounts table
+WITH RankedLoans AS (
+    SELECT
+        LoanID, AccountID, LoanStatusID, PrincipalAmount, InterestRate, StartDate, EstimatedEndDate,
+        ROW_NUMBER() OVER (PARTITION BY AccountID
+            ORDER BY 
+                CASE WHEN AccountID IS NOT NULL AND TRIM(AccountID) <> '' THEN 1 
+                     WHEN PrincipalAmount IS NOT NULL THEN 2
+                     ELSE 3 END
+        ) AS RowNum
+    FROM staging.RawLoans
+    WHERE LoanID IS NOT NULL AND TRIM(LoanID) <> ''
+)
+INSERT INTO audit.QuarantineLoans (
+    LoanID, AccountID, LoanStatusID, PrincipalAmount, InterestRate, StartDate, EstimatedEndDate, QuarantineReason
+)
+SELECT LoanID, AccountID, LoanStatusID, PrincipalAmount, InterestRate, StartDate, EstimatedEndDate, 'Duplicate Loan ID'
+FROM RankedLoans
+WHERE RowNum > 1;
+
+-- Load the unique Account records into Core Accounts table
+WITH RankedLoans AS (
+    SELECT
+        LoanID, AccountID, LoanStatusID, PrincipalAmount, InterestRate, StartDate, EstimatedEndDate,
+        ROW_NUMBER() OVER (PARTITION BY LoanID
+            ORDER BY 
+                CASE WHEN AccountID IS NOT NULL AND TRIM(CustomerID) <> '' THEN 1 
+                     WHEN PrincipalAmount IS NOT NULL THEN 2
+                     ELSE 3 END
+        ) AS RowNum
+    FROM staging.RawLoans
+    WHERE LoanID IS NOT NULL AND TRIM(AccountID) <> ''
+)
+INSERT INTO core.Loans (
+    LoanID, AccountID, LoanStatusID, PrincipalAmount, InterestRate, StartDate, EstimatedEndDate
+)
+SELECT 
+    CAST(LoanID AS INT) AS LoanID,
+    CAST(AccountID AS INT) AS AccountID,
+    CAST(LoanStatusID AS INT) AS LoanStatusID,
+    CAST(PrincipalAmount AS DECIMAL(18,2)) AS PrincipalAmount,
+    CAST(InterestRate AS DECIMAL(5,4)) AS InterestRate,
+    TRY_CAST(
+        CASE
+            -- Handle cases where the month and day are swapped in the date string 
+            WHEN StartDate LIKE '[1-2][0-9][0-9][0-9]-[0-3][0-9]-[0-1][0-9]'
+             AND CAST(SUBSTRING(StartDate, 6, 2) AS INT) > 12
+                THEN CONCAT(
+                    SUBSTRING(StartDate, 1, 4), '-', 
+                    SUBSTRING(StartDate, 9, 2), '-', 
+                    SUBSTRING(StartDate, 6, 2)
+                )
+            ELSE COALESCE(NULLIF(TRIM(StartDate), 'NaT'), '1900-01-01') -- Default to a known date if invalid
+        END AS DATE
+    ) AS StartDate
+FROM RankedLoans
+WHERE RowNum = 1 AND LoanID NOT IN (
+    SELECT LoanID FROM audit.QuarantineLoans WHERE LoanID IS NOT NULL AND TRIM(LoanID) <> '' AND QuarantineReason <> 'Duplicate Loan ID' 
+)
 
 -- 5. Transactions
 CREATE TABLE core.Transactions (
