@@ -4,7 +4,8 @@
 -- USAGE: Execute in SSMS with SQLCMD Mode enabled (Query -> SQLCMD Mode).
 -- ============================================================================
 
-:setvar DatabaseName "FinancialDWH"
+:setvar DatabaseName "CapitalMarketsDB"
+:setvar ScriptPath "C:\Users\yabu01-82403ierunway\新しいフォルダー\capital-markets-analytics-sql\scripts\"
 USE $(DatabaseName);
 GO
 
@@ -24,7 +25,7 @@ GO
 -- Creates staging, core, audit, analytics, and sec schemas.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 1: Initializing Schemas and Infrastructure...';
-:r .\01_schema_setup.sql
+:r $(ScriptPath)01_schema_setup.sql
 GO
 
 
@@ -33,7 +34,7 @@ GO
 -- Creates raw staging tables and ingests source landing files.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 2: Loading Staging Data (staging schema)...';
-:r .\02_staging_load.sql
+:r $(ScriptPath)02_staging_load.sql
 GO
 
 
@@ -43,7 +44,7 @@ GO
 -- Dependency: Required BEFORE Core and Analytics joins.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 3: Populating Reference Dimensions (core schema)...';
-:r .\03_reference_tables.sql
+:r $(ScriptPath)03_reference_tables.sql
 GO
 
 
@@ -52,7 +53,7 @@ GO
 -- Creates audit tables for hard failures and quality exceptions.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 4: Initializing Audit & Quarantine Schema (audit schema)...';
-:r .\04_quarantine_tables.sql
+:r $(ScriptPath)04_quarantine_tables.sql
 GO
 
 
@@ -63,7 +64,7 @@ GO
 -- Dependency Order: Addresses -> Customers -> Accounts -> Loans -> Transactions.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 5: Processing & Loading Core Entities (core & audit schemas)...';
-:r .\05_core_table_creation.sql
+:r $(ScriptPath)05_core_table_creation.sql
 GO
 
 
@@ -73,7 +74,7 @@ GO
 -- Dependency: Executed after physical tables are built and populated.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 6: Deploying Non-Clustered Indexes...';
-:r .\optimize_index.sql
+:r $(ScriptPath)06_optimize_index.sql
 GO
 
 
@@ -82,7 +83,7 @@ GO
 -- Recreates Gold Layer reporting views (v_CustomerOverview, v_TransactionLedger, etc.).
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 7: Creating Analytics Reporting Views (analytics schema)...';
-:r .\analytics_views.sql
+:r $(ScriptPath)07_analytics_views.sql
 GO
 
 
@@ -91,7 +92,7 @@ GO
 -- Deploys predicate functions and security policies on core entities.
 -- ----------------------------------------------------------------------------
 PRINT '--> Step 8: Applying Row-Level Security Policies (sec schema)...';
-:r .\security_rls.sql
+:r $(ScriptPath)08_security_rls.sql
 GO
 
 
