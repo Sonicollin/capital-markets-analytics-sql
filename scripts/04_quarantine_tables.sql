@@ -1,3 +1,10 @@
+-- ==========================================
+-- Capital Markets Analytics Data Warehouse
+-- Script 04: Quarantine Tables Initialized and Loaded 
+-- Quarantines records missing critical data (primary keys, foreign keys) and referential integrity violations
+-- Important Note: Duplicates are NOT quarantined in this script, but in Script 05: core_table_creation
+-- ==========================================
+
 USE CapitalMarketsDB;
 GO
 
@@ -246,79 +253,52 @@ CREATE TABLE audit.QuarantineTransactions (
 );
 GO
 
--- Quarantine Transactions with Missing Dates --
+-- Quarantine Transactions with Missing Transaction ID, Orphan Transactions, Invalid Amounts, Missing Dates, Missing Transaction Type --
 INSERT INTO audit.QuarantineTransactions (
-    TransactionID,
-    AccountOriginID,
-    AccountDestinationID,
-    TransactionTypeID,
-    Amount,
-    TransactionDate,
-    BranchID,
-    Description,
-    QuarantineReason
+    TransactionID, AccountOriginID, AccountDestinationID, TransactionTypeID, Amount, TransactionDate, BranchID,
+    Description, QuarantineReason
 )
 SELECT 
-    TransactionID,
-    AccountOriginID,
-    AccountDestinationID,
-    TransactionTypeID,
-    Amount,
-    TransactionDate,
-    BranchID,
+    TransactionID, AccountOriginID, AccountDestinationID, TransactionTypeID, Amount, TransactionDate, BranchID,
     Description,
-    'Missing Transaction Date' AS QuarantineReason
-FROM staging.RawTransactions
-WHERE TransactionDate IS NULL OR TransactionDate = '';
-GO
-
--- MODIFIED: Only quarantine transactions if they reference accounts with CRITICAL data issues
-INSERT INTO audit.QuarantineTransactions (
-    TransactionID, AccountOriginID, AccountDestinationID, TransactionTypeID,
-    Amount, TransactionDate, BranchID, Description, QuarantineReason
-)
-SELECT DISTINCT
-    TransactionID, AccountOriginID, AccountDestinationID, TransactionTypeID,
-    Amount, TransactionDate, BranchID, Description,
     CASE
+        WHEN TransactionID IS NULL OR TRIM(TransactionID) = ''
+            THEN 'Missing Primary Key: TransactionID is NULL or Blank'
+        WHEN AccountOriginID IS NULL OR TRIM(AccountOriginID) = ''
+            THEN 'Missing Foreign Key: AccountOriginID is NULL or Blank'
         WHEN AccountOriginID NOT IN (SELECT AccountID FROM staging.RawAccounts)
             THEN 'Referential Integrity Violation: AccountOriginID does not exist in RawAccounts'
+        WHEN AccountOriginID IN (SELECT AccountID FROM audit.QuarantineAccounts WHERE QuarantineReason <> 'Duplicate Account ID')
+            THEN 'Referential Integrity Violation: AccountOriginID quarantined in QuarantineAccounts'
+        WHEN AccountDestinationID IS NULL OR TRIM(AccountDestinationID) = ''
+            THEN 'Missing Foreign Key: AccountDestinationID is NULL or Blank'
         WHEN AccountDestinationID NOT IN (SELECT AccountID FROM staging.RawAccounts)
             THEN 'Referential Integrity Violation: AccountDestinationID does not exist in RawAccounts'
-        -- ONLY quarantine if account has CRITICAL issues (not duplicates, not cascaded from customer)
-        WHEN AccountOriginID IN (SELECT AccountID FROM audit.QuarantineAccounts 
-                                 WHERE QuarantineReason IN (
-                                    'Missing Primary Key: AccountID is NULL or Blank',
-                                    'OpeningDate is missing',
-                                    'Data Format Violation: Unparseable OpeningDate string',
-                                    'Logical Business Violation: Future OpeningDate detected'
-                                 ))
-            THEN 'Referential Integrity Violation: AccountOriginID has critical data quality issues'
-        WHEN AccountDestinationID IN (SELECT AccountID FROM audit.QuarantineAccounts 
-                                      WHERE QuarantineReason IN (
-                                        'Missing Primary Key: AccountID is NULL or Blank',
-                                        'OpeningDate is missing',
-                                        'Data Format Violation: Unparseable OpeningDate string',
-                                        'Logical Business Violation: Future OpeningDate detected'
-                                      ))
-            THEN 'Referential Integrity Violation: AccountDestinationID has critical data quality issues'
-            ELSE 'Referential Integrity Violation: AccountDestinationID is quarantined in QuarantineAccounts'
-    END AS QuarantineReason
+        WHEN AccountDestinationID IN (SELECT AccountID FROM audit.QuarantineAccounts WHERE QuarantineReason <> 'Duplicate Account ID')
+            THEN 'Referential Integrity Violation: AccountDestinationID quarantined in QuarantineAccounts'
+        WHEN TRY_CAST(Amount AS DECIMAL(18,2)) IS NULL
+            THEN 'Amount is Missing or Invalid'
+        WHEN TRY_CAST(TransactionTypeID AS INT) IS NULL
+            THEN 'Missing Transaction Type ID'
+        WHEN TransactionDate IS NULL OR TRIM(TransactionDate) = '' OR TRY_CAST(TransactionDate AS DATETIME2) IS NULL
+            THEN 'Missing Transaction Date or unparseable transaction date'
+        ELSE NULL END AS QuarantineReason
 FROM staging.RawTransactions
-WHERE TransactionDate IS NOT NULL AND TransactionDate <> ''
-  AND (
-    AccountOriginID NOT IN (SELECT AccountID FROM staging.RawAccounts)
+WHERE TransactionDate IS NULL OR TransactionDate = ''
+    OR AccountOriginID IS NULL OR TRIM(AccountOriginID) = ''
+    OR AccountOriginID NOT IN (SELECT AccountID FROM staging.RawAccounts)
+    OR AccountOriginID IN (SELECT AccountID FROM audit.QuarantineAccounts WHERE QuarantineReason <> 'Duplicate Account ID')
+    OR AccountDestinationID IS NULL OR TRIM(AccountDestinationID) = ''
     OR AccountDestinationID NOT IN (SELECT AccountID FROM staging.RawAccounts)
-    OR AccountOriginID IN (SELECT AccountID FROM audit.QuarantineAccounts 
-                           WHERE QuarantineReason NOT IN ('Duplicate Account ID', 'Referential Integrity Violation: CustomerID is quarantined in QuarantineCustomers'))
-    OR AccountDestinationID IN (SELECT AccountID FROM audit.QuarantineAccounts 
-                               WHERE QuarantineReason NOT IN ('Duplicate Account ID', 'Referential Integrity Violation: CustomerID is quarantined in QuarantineCustomers'))
-  );
+    OR AccountDestinationID IN (SELECT AccountID FROM audit.QuarantineAccounts WHERE QuarantineReason <> 'Duplicate Account ID')
+    OR TRY_CAST(Amount AS DECIMAL(18,2)) IS NULL
+    OR TRY_CAST(TransactionTypeID AS INT) IS NULL
+    OR TransactionDate IS NULL OR TRIM(TransactionDate) = '' OR TRY_CAST(TransactionDate AS DATETIME2) IS NULL;
+GO
 
-
-SELECT * FROM audit.QuarantineTransactions
-
-SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAddresses GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
-SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineCustomers GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
-SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAccounts GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
-SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineTransactions GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
+-- Quarantine Reason Dashboard --
+-- SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAddresses GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
+-- SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineCustomers GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
+-- SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineAccounts GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
+-- SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineLoans GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;
+-- SELECT QuarantineReason, COUNT(*) AS QuarantinedCount FROM audit.QuarantineTransactions GROUP BY QuarantineReason ORDER BY QuarantinedCount DESC;

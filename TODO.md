@@ -10,10 +10,14 @@
 
 ## Phase 2: SQL Data Warehouse & Logic
 - [x] Write `01_schema_setup.sql` (Star schema fact/dim tables)
-- [ ] Write `02_data_transformation.sql` (CTEs, Window functions, Moving averages)
-- [ ] Add indexes for query performance optimization
-- [ ] Write `03_analytics_views.sql` (Reporting views)
-- [ ] Write `04_security_rls.sql` (Row-Level Security predicates)
+- [x] Write `02_staging_load.sql` (Load Raw Data in Staging tables)
+- [x] Write `03_reference_tables.sql` (Lookup tables)
+- [x] Write `04_quarantine_tables.sql` (Quarantine bad data using CTEs)
+- [x] Write `05_core_table_creation.sql` (Populate Core Tables using CTEs and Window functions, and quarantine duplicates)
+- [x] Write `06_optimize_index.sql` (Create non-clustered indexes on foreign key columns)
+- [x] Write `07_analytics_views.sql` (Create clean views of several tables using joins from core tables to reference tables)
+- [x] Write `08_security_rls.sql` (Implement Row-Level Security)
+- [x] Write `09_main_deploy.sql` (Deployment script that runs with SQLCMD in SSMS)
 
 ## Phase 3: Power BI Dashboard
 - [ ] Connect Power BI to SQL Server views
